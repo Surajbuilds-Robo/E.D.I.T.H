@@ -1,0 +1,18 @@
+
+{
+  "name": "edith",
+  "version": "0.1.0",
+  "private": true,
+  "description": "E.D.I.T.H - Enhanced Digital Intelligence & Task Handler",
+  "scripts": {
+    "dev:web": "pnpm --filter @edith/web dev",
+    "dev:desktop": "pnpm --filter @edith/desktop dev",
+    "dev:all": "turbo run dev --parallel",
+    "build": "turbo run build",
+    "lint": "turbo run lint"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0"
+  },
+  "packageManager": "pnpm@10.0.0"
+}
