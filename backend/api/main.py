@@ -1,8 +1,8 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from backend.api.routes.chat import router as chat_router
+from backend.api.routes.auth import router as auth_router
 
 app = FastAPI(
     title="E.D.I.T.H API",
@@ -11,18 +11,18 @@ app = FastAPI(
 )
 
 app.include_router(chat_router)
+app.include_router(auth_router)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://127.0.0.1:5173",
-        "http://localhost:5173"
+        "http://localhost:5173",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
-
 
 @app.get("/")
 async def root():
