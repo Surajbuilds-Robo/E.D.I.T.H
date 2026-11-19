@@ -8,7 +8,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from backend.database.connection import get_db
-from backend.database.models import User
+from backend.database.models import User, UserSession
+
 
 load_dotenv()
 
@@ -19,18 +20,22 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = Depends(
+        bearer_scheme
+    ),
     db: Session = Depends(get_db),
 ) -> User:
 
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid or expired authentication token.",
+        detail="Invalid, expired, or revoked authentication session.",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
     if not JWT_SECRET or credentials is None:
-        print("AUTH ERROR: Missing JWT secret or bearer credentials.")
+        raise unauthorized
+
+    if credentials.scheme.lower() != "bearer":
         raise unauthorized
 
     try:
@@ -38,45 +43,52 @@ def get_current_user(
             credentials.credentials,
             JWT_SECRET,
             algorithms=[JWT_ALGORITHM],
+            options={
+                "require": ["sub", "exp", "iat", "type", "sid"],
+            },
         )
 
-        print("AUTH DEBUG: JWT signature and expiration valid.")
-        print("AUTH DEBUG: Token type:", payload.get("type"))
-
         if payload.get("type") != "access":
-            print("AUTH ERROR: Incorrect token type.")
             raise unauthorized
 
         user_id = int(payload.get("sub", 0))
+        session_id = int(payload.get("sid", 0))
 
-        if user_id <= 0:
-            print("AUTH ERROR: Invalid user ID.")
+        if user_id <= 0 or session_id <= 0:
             raise unauthorized
 
-    except jwt.ExpiredSignatureError:
-        print("AUTH ERROR: Token expired.")
-        raise unauthorized
-
-    except jwt.InvalidSignatureError:
-        print("AUTH ERROR: JWT signature mismatch.")
-        raise unauthorized
-
-    except jwt.InvalidTokenError as error:
-        print("AUTH ERROR: Invalid JWT:", type(error).__name__)
+    except jwt.InvalidTokenError:
         raise unauthorized
 
     except (ValueError, TypeError):
-        print("AUTH ERROR: Invalid user ID in token.")
         raise unauthorized
 
-    user = db.query(User).filter(User.id == user_id).first()
+    session = (
+        db.query(UserSession)
+        .filter(
+            UserSession.id == session_id,
+            UserSession.user_id == user_id,
+            UserSession.revoked_at.is_(None),
+            UserSession.expires_at > __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ),
+        )
+        .first()
+    )
+
+    if not session:
+        raise unauthorized
+
+    user = (
+        db.query(User)
+        .filter(
+            User.id == user_id,
+            User.is_active.is_(True),
+        )
+        .first()
+    )
 
     if not user:
-        print("AUTH ERROR: User does not exist:", user_id)
-        raise unauthorized
-
-    if not user.is_active:
-        print("AUTH ERROR: User is inactive:", user_id)
         raise unauthorized
 
     return user

@@ -11,12 +11,22 @@ const fs = require("fs/promises");
 
 const DEV_SERVER_URL = "http://127.0.0.1:5173";
 
-const STORAGE_FILE = path.join(
-  app.getPath("userData"),
+const USER_DATA = app.getPath("userData");
+
+const CONVERSATION_FILE = path.join(
+  USER_DATA,
   "active-conversation.dat"
 );
 
-// Only allow IPC requests from E.D.I.T.H's own renderer.
+const AUTH_SESSION_FILE = path.join(
+  USER_DATA,
+  "auth-session.dat"
+);
+
+// ======================================
+// SECURITY HELPERS
+// ======================================
+
 function verifyRenderer(event) {
   const url = event.senderFrame?.url || "";
 
@@ -29,31 +39,92 @@ function verifyRenderer(event) {
   }
 }
 
-// Validate conversation IDs.
 function validateConversationId(id) {
   return Number.isSafeInteger(id) && id > 0;
 }
 
-// Check asynchronous encryption availability.
+function validateAuthSession(session) {
+  return (
+    session !== null &&
+    typeof session === "object" &&
+    typeof session.access_token === "string" &&
+    session.access_token.length >= 20 &&
+    session.access_token.length <= 16384 &&
+    !/\s/.test(session.access_token) &&
+    typeof session.refresh_token === "string" &&
+    session.refresh_token.length >= 32 &&
+    session.refresh_token.length <= 256 &&
+    !/\s/.test(session.refresh_token) &&
+    Number.isSafeInteger(session.session_id) &&
+    session.session_id > 0
+  );
+}
+
 async function ensureSecureStorage() {
-  const available = await safeStorage.isAsyncEncryptionAvailable();
+  const available =
+    await safeStorage.isAsyncEncryptionAvailable();
 
   if (!available) {
     throw new Error("Secure storage is unavailable.");
   }
 }
 
-// Get the encrypted active conversation ID.
+async function readEncryptedFile(filePath) {
+  try {
+    return await fs.readFile(filePath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function writeEncryptedFile(filePath, data) {
+  await ensureSecureStorage();
+
+  const encryptedData =
+    await safeStorage.encryptStringAsync(data);
+
+  const temporaryFile = `${filePath}.tmp`;
+
+  await fs.writeFile(temporaryFile, encryptedData, {
+    mode: 0o600
+  });
+
+  await fs.rename(temporaryFile, filePath);
+}
+
+async function removeFile(filePath) {
+  try {
+    await fs.unlink(filePath);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+// ======================================
+// ACTIVE CONVERSATION STORAGE
+// ======================================
+
 ipcMain.handle(
   "edith:get-active-conversation",
   async (event) => {
     verifyRenderer(event);
-
     await ensureSecureStorage();
 
-    try {
-      const encryptedData = await fs.readFile(STORAGE_FILE);
+    const encryptedData = await readEncryptedFile(
+      CONVERSATION_FILE
+    );
 
+    if (!encryptedData) {
+      return null;
+    }
+
+    try {
       const decryptedData =
         await safeStorage.decryptStringAsync(encryptedData);
 
@@ -64,18 +135,13 @@ ipcMain.handle(
       }
 
       return parsed.conversationId;
-
-    } catch (error) {
-      if (error.code === "ENOENT") {
-        return null;
-      }
-
-      throw error;
+    } catch {
+      await removeFile(CONVERSATION_FILE);
+      return null;
     }
   }
 );
 
-// Save the encrypted active conversation ID.
 ipcMain.handle(
   "edith:set-active-conversation",
   async (event, conversationId) => {
@@ -85,40 +151,101 @@ ipcMain.handle(
       throw new Error("Invalid conversation ID.");
     }
 
-    await ensureSecureStorage();
-
-    const data = JSON.stringify({
-      conversationId
-    });
-
-    const encryptedData =
-      await safeStorage.encryptStringAsync(data);
-
-    await fs.writeFile(STORAGE_FILE, encryptedData);
+    await writeEncryptedFile(
+      CONVERSATION_FILE,
+      JSON.stringify({ conversationId })
+    );
 
     return true;
   }
 );
 
-// Clear the saved active conversation ID.
 ipcMain.handle(
   "edith:clear-active-conversation",
   async (event) => {
     verifyRenderer(event);
 
-    try {
-      await fs.unlink(STORAGE_FILE);
-    } catch (error) {
-      if (error.code !== "ENOENT") {
-        throw error;
-      }
-    }
+    await removeFile(CONVERSATION_FILE);
 
     return true;
   }
 );
 
-// Create the application window.
+// ======================================
+// AUTHENTICATION SESSION STORAGE
+// ======================================
+
+ipcMain.handle(
+  "edith:get-auth-session",
+  async (event) => {
+    verifyRenderer(event);
+
+    await ensureSecureStorage();
+
+    const encryptedData = await readEncryptedFile(
+      AUTH_SESSION_FILE
+    );
+
+    if (!encryptedData) {
+      return null;
+    }
+
+    try {
+      const decryptedData =
+        await safeStorage.decryptStringAsync(encryptedData);
+
+      const session = JSON.parse(decryptedData);
+
+      if (!validateAuthSession(session)) {
+        await removeFile(AUTH_SESSION_FILE);
+        return null;
+      }
+
+      return session;
+    } catch {
+      await removeFile(AUTH_SESSION_FILE);
+      return null;
+    }
+  }
+);
+
+ipcMain.handle(
+  "edith:set-auth-session",
+  async (event, session) => {
+    verifyRenderer(event);
+
+    if (!validateAuthSession(session)) {
+      throw new Error("Invalid authentication session.");
+    }
+
+    await writeEncryptedFile(
+      AUTH_SESSION_FILE,
+      JSON.stringify({
+        access_token: session.access_token,
+        refresh_token: session.refresh_token,
+        session_id: session.session_id
+      })
+    );
+
+    return true;
+  }
+);
+
+ipcMain.handle(
+  "edith:clear-auth-session",
+  async (event) => {
+    verifyRenderer(event);
+
+    await removeFile(AUTH_SESSION_FILE);
+
+    return true;
+  }
+);
+
+// ======================================
+// WINDOW CREATION
+// ======================================
+
 function createWindow() {
   const mainWindow = new BrowserWindow({
     width: 1200,
@@ -154,7 +281,10 @@ function createWindow() {
   }
 }
 
-// Application lifecycle.
+// ======================================
+// APPLICATION LIFECYCLE
+// ======================================
+
 app.whenReady().then(() => {
   createWindow();
 

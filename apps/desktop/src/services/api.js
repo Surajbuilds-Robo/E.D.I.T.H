@@ -1,27 +1,114 @@
 
 const API_BASE_URL = "http://127.0.0.1:8000";
 
+let currentSession = null;
+let refreshPromise = null;
+
+// ==============================
+// SESSION MANAGEMENT
+// ==============================
+
+export function setCurrentSession(session) {
+  currentSession = session;
+}
+
+export function clearCurrentSession() {
+  currentSession = null;
+  refreshPromise = null;
+}
+
+async function refreshSession() {
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  refreshPromise = (async () => {
+    if (!currentSession?.refresh_token) {
+      throw new Error("No refresh token available.");
+    }
+
+    const response = await fetch(
+      `${API_BASE_URL}/api/v1/auth/refresh`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          refresh_token: currentSession.refresh_token,
+        }),
+      }
+    );
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(
+        data.detail || "Session renewal failed."
+      );
+    }
+
+    const updatedSession = {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      session_id: data.session_id,
+    };
+
+    await window.edith.setAuthSession(updatedSession);
+
+    currentSession = updatedSession;
+
+    return updatedSession;
+  })();
+
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
 // ==============================
 // COMMON API HELPER
 // ==============================
 
-async function apiRequest(endpoint, options = {}, token = null) {
-  const headers = {
-    "Content-Type": "application/json",
-    ...options.headers,
-  };
+async function apiRequest(endpoint, options = {}, authenticated = false) {
+  const makeRequest = async (token = null) => {
+    const headers = {
+      "Content-Type": "application/json",
+      ...options.headers,
+    };
 
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
 
-  const response = await fetch(
-    `${API_BASE_URL}${endpoint}`,
-    {
+    return fetch(`${API_BASE_URL}${endpoint}`, {
       ...options,
       headers,
-    }
+    });
+  };
+
+  let response = await makeRequest(
+    authenticated ? currentSession?.access_token : null
   );
+
+  if (response.status === 401 && authenticated) {
+    try {
+      await refreshSession();
+
+      response = await makeRequest(
+        currentSession.access_token
+      );
+    } catch (error) {
+      await window.edith?.clearAuthSession();
+      clearCurrentSession();
+
+      throw new Error(
+        "Your session has expired. Please sign in again."
+      );
+    }
+  }
 
   const data = await response.json().catch(() => ({}));
 
@@ -55,7 +142,7 @@ export async function checkBackendHealth() {
 // ==============================
 
 export async function registerUser(username, email, password) {
-  return await apiRequest(
+  return apiRequest(
     "/api/v1/auth/register",
     {
       method: "POST",
@@ -69,15 +156,57 @@ export async function registerUser(username, email, password) {
 }
 
 export async function loginUser(identifier, password) {
-  return await apiRequest(
+  return apiRequest(
     "/api/v1/auth/login",
     {
       method: "POST",
       body: JSON.stringify({
         identifier,
         password,
+        device_name: "E.D.I.T.H Desktop",
       }),
     }
+  );
+}
+
+export async function logoutUser() {
+  if (!currentSession?.refresh_token) {
+    clearCurrentSession();
+    await window.edith?.clearAuthSession();
+    return;
+  }
+
+  try {
+    await apiRequest(
+      "/api/v1/auth/logout",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          refresh_token: currentSession.refresh_token,
+        }),
+      }
+    );
+  } finally {
+    clearCurrentSession();
+    await window.edith?.clearAuthSession();
+  }
+}
+
+export async function getSessions() {
+  return apiRequest(
+    "/api/v1/auth/sessions",
+    {},
+    true
+  );
+}
+
+export async function revokeSession(sessionId) {
+  return apiRequest(
+    `/api/v1/auth/sessions/${sessionId}`,
+    {
+      method: "DELETE",
+    },
+    true
   );
 }
 
@@ -85,12 +214,8 @@ export async function loginUser(identifier, password) {
 // CHAT
 // ==============================
 
-export async function sendChatMessage(
-  message,
-  conversationId = null,
-  token
-) {
-  return await apiRequest(
+export async function sendChatMessage(message, conversationId = null) {
+  return apiRequest(
     "/api/v1/chat/",
     {
       method: "POST",
@@ -99,7 +224,7 @@ export async function sendChatMessage(
         conversation_id: conversationId,
       }),
     },
-    token
+    true
   );
 }
 
@@ -107,28 +232,113 @@ export async function sendChatMessage(
 // CONVERSATION HISTORY
 // ==============================
 
-export async function getConversations(token) {
-  return await apiRequest(
+export async function getConversations() {
+  return apiRequest(
     "/api/v1/chat/conversations",
     {},
-    token
+    true
   );
 }
 
-export async function getConversation(conversationId, token) {
-  return await apiRequest(
+export async function getConversation(conversationId) {
+  return apiRequest(
     `/api/v1/chat/conversations/${conversationId}`,
     {},
-    token
+    true
   );
 }
 
-export async function deleteConversation(conversationId, token) {
-  return await apiRequest(
+export async function deleteConversation(conversationId) {
+  return apiRequest(
     `/api/v1/chat/conversations/${conversationId}`,
     {
       method: "DELETE",
     },
-    token
+    true
+  );
+}
+
+// ==============================
+// LONG-TERM MEMORY
+// ==============================
+
+export async function getMemories() {
+  return apiRequest(
+    "/api/v1/memory/",
+    {},
+    true
+  );
+}
+
+export async function getMemory(memoryId) {
+  return apiRequest(
+    `/api/v1/memory/${memoryId}`,
+    {},
+    true
+  );
+}
+
+export async function createMemory(content, category = "other") {
+  return apiRequest(
+    "/api/v1/memory/",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        content,
+        category,
+        source_conversation_id: null,
+      }),
+    },
+    true
+  );
+}
+
+export async function updateMemory(memoryId, content, category) {
+  return apiRequest(
+    `/api/v1/memory/${memoryId}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        content,
+        category,
+      }),
+    },
+    true
+  );
+}
+
+export async function deleteMemory(memoryId) {
+  return apiRequest(
+    `/api/v1/memory/${memoryId}`,
+    {
+      method: "DELETE",
+    },
+    true
+  );
+}
+
+export async function checkDuplicateMemory(content) {
+  return apiRequest(
+    "/api/v1/memory/check-duplicate",
+    {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    },
+    true
+  );
+}
+
+
+// ==============================
+// MEMORY SUGGESTIONS
+// ==============================
+
+export async function getMemorySuggestion(conversationId) {
+  return apiRequest(
+    `/api/v1/chat/conversations/${conversationId}/memory-suggestion`,
+    {
+      method: "POST",
+    },
+    true
   );
 }

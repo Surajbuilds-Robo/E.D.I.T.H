@@ -5,7 +5,9 @@ import {
   sendChatMessage,
   getConversations,
   getConversation,
-  deleteConversation
+  deleteConversation,
+  getMemorySuggestion,
+  createMemory,
 } from "../services/api";
 
 import "./Chat.css";
@@ -15,8 +17,8 @@ function Chat() {
     {
       id: 1,
       role: "assistant",
-      content: "Hello! I am E.D.I.T.H. How can I assist you today?"
-    }
+      content: "Hello! I am E.D.I.T.H. How can I assist you today?",
+    },
   ]);
 
   const [conversations, setConversations] = useState([]);
@@ -27,60 +29,29 @@ function Chat() {
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState("");
 
+  const [memorySuggestion, setMemorySuggestion] = useState(null);
+  const [suggestionLoading, setSuggestionLoading] = useState(false);
+  const [savingMemory, setSavingMemory] = useState(false);
+  const [memoryNotice, setMemoryNotice] = useState("");
+
+  // Prevent dismissed suggestions from reappearing in this app session.
+  const [dismissedSuggestions, setDismissedSuggestions] = useState(
+    new Set()
+  );
+
   const messagesEndRef = useRef(null);
+  const conversationIdRef = useRef(null);
 
-  // Load history and restore the last active conversation.
-  useEffect(() => {
-    async function initializeChat() {
-      await loadConversations();
+  function updateConversationId(id) {
+    conversationIdRef.current = id;
+    setConversationId(id);
+  }
 
-      try {
-        const savedId = await window.edith.getActiveConversation();
+  function suggestionKey(id, content) {
+    return `${id}:${content.trim().toLowerCase()}`;
+  }
 
-        if (savedId) {
-          const conversation = await getConversation(savedId);
-
-          setConversationId(conversation.id);
-
-          setMessages(
-            conversation.messages.map((message) => ({
-              id: message.id,
-              role: message.role,
-              content: message.content,
-              status: "success"
-            }))
-          );
-        }
-      } catch (error) {
-        console.error("Conversation restoration failed:", error);
-
-        setConversationId(null);
-
-        setMessages([
-          {
-            id: Date.now(),
-            role: "assistant",
-            content: "Your previous conversation could not be restored. You can select it from history or start a new chat."
-          }
-        ]);
-
-        try {
-          await window.edith.clearActiveConversation();
-        } catch (storageError) {
-          console.error("Unable to clear saved conversation:", storageError);
-        }
-      }
-    }
-
-    initializeChat();
-  }, []);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({
-      behavior: "smooth"
-    });
-  }, [messages, loading]);
-
+  // Load authenticated conversation history.
   async function loadConversations() {
     setHistoryLoading(true);
     setHistoryError("");
@@ -95,48 +66,175 @@ function Chat() {
     }
   }
 
+  // Request a memory suggestion without saving it.
+  async function requestMemorySuggestion(id) {
+    if (!id || conversationIdRef.current !== id) return;
+
+    setSuggestionLoading(true);
+    setMemorySuggestion(null);
+    setMemoryNotice("");
+
+    try {
+      const result = await getMemorySuggestion(id);
+
+      // Ignore results belonging to a conversation that is no longer open.
+      if (conversationIdRef.current !== id) return;
+
+      const suggestion = result?.suggestion;
+
+      if (!suggestion?.content || !suggestion?.category) {
+        setMemorySuggestion(null);
+        return;
+      }
+
+      const key = suggestionKey(id, suggestion.content);
+
+      if (dismissedSuggestions.has(key)) {
+        setMemorySuggestion(null);
+        return;
+      }
+
+      setMemorySuggestion({
+        ...suggestion,
+        conversationId: id,
+      });
+    } catch (error) {
+      console.error("Memory suggestion failed:", error);
+    } finally {
+      if (conversationIdRef.current === id) {
+        setSuggestionLoading(false);
+      }
+    }
+  }
+
+  // Restore the last active conversation.
+  useEffect(() => {
+    let mounted = true;
+
+    async function initializeChat() {
+      try {
+        const data = await getConversations();
+
+        if (!mounted) return;
+
+        setConversations(data);
+
+        const savedId = await window.edith.getActiveConversation();
+
+        if (!savedId || !mounted) return;
+
+        const conversation = await getConversation(savedId);
+
+        if (!mounted) return;
+
+        updateConversationId(conversation.id);
+
+        setMessages(
+          conversation.messages.map((message) => ({
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            status: "success",
+          }))
+        );
+      } catch (error) {
+        if (!mounted) return;
+
+        console.error("Conversation restoration failed:", error);
+
+        updateConversationId(null);
+
+        setMessages([
+          {
+            id: Date.now(),
+            role: "assistant",
+            content:
+              "Your previous conversation could not be restored. You can select it from history or start a new chat.",
+          },
+        ]);
+
+        try {
+          await window.edith.clearActiveConversation();
+        } catch (storageError) {
+          console.error(
+            "Unable to clear saved conversation:",
+            storageError
+          );
+        }
+
+        if (mounted) {
+          setHistoryError(error.message);
+        }
+      } finally {
+        if (mounted) {
+          setHistoryLoading(false);
+        }
+      }
+    }
+
+    initializeChat();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // Auto-scroll to the latest message.
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+    });
+  }, [messages, loading, memorySuggestion]);
+
+  // Open an existing conversation.
   async function openConversation(id) {
     if (loading) return;
 
     try {
       const data = await getConversation(id);
 
-      setConversationId(data.id);
+      updateConversationId(data.id);
 
       setMessages(
         data.messages.map((message) => ({
           id: message.id,
           role: message.role,
           content: message.content,
-          status: "success"
+          status: "success",
         }))
       );
 
-      await window.edith.setActiveConversation(data.id);
+      setMemorySuggestion(null);
+      setMemoryNotice("");
 
+      await window.edith.setActiveConversation(data.id);
       setHistoryError("");
     } catch (error) {
       setHistoryError(error.message);
     }
   }
 
+  // Start a new conversation.
   async function startNewChat() {
     if (loading) return;
 
     try {
       await window.edith.clearActiveConversation();
 
-      setConversationId(null);
+      updateConversationId(null);
 
       setMessages([
         {
           id: Date.now(),
           role: "assistant",
-          content: "Hello! I am E.D.I.T.H. How can I assist you today?"
-        }
+          content: "Hello! I am E.D.I.T.H. How can I assist you today?",
+        },
       ]);
 
       setInput("");
+      setMemorySuggestion(null);
+      setMemoryNotice("");
+      setSuggestionLoading(false);
       setHistoryError("");
     } catch (error) {
       setHistoryError("Unable to clear the saved conversation.");
@@ -144,6 +242,7 @@ function Chat() {
     }
   }
 
+  // Delete a conversation.
   async function handleDeleteConversation(id) {
     if (loading) return;
 
@@ -156,18 +255,21 @@ function Chat() {
     try {
       await deleteConversation(id);
 
-      if (conversationId === id) {
+      if (conversationIdRef.current === id) {
         await window.edith.clearActiveConversation();
 
-        setConversationId(null);
+        updateConversationId(null);
 
         setMessages([
           {
             id: Date.now(),
             role: "assistant",
-            content: "Conversation deleted. How can I help you?"
-          }
+            content: "Conversation deleted. How can I help you?",
+          },
         ]);
+
+        setMemorySuggestion(null);
+        setMemoryNotice("");
       }
 
       await loadConversations();
@@ -176,7 +278,10 @@ function Chat() {
     }
   }
 
-  async function handleSend() {
+  // Send a message to E.D.I.T.H.
+  async function handleSend(event) {
+    event?.preventDefault();
+
     const text = input.trim();
 
     if (!text || loading) return;
@@ -184,25 +289,26 @@ function Chat() {
     const userMessage = {
       id: Date.now(),
       role: "user",
-      content: text
+      content: text,
     };
 
     setMessages((previous) => [...previous, userMessage]);
     setInput("");
     setLoading(true);
+    setMemorySuggestion(null);
+    setMemoryNotice("");
 
     try {
       const response = await sendChatMessage(
         text,
-        conversationId
+        conversationIdRef.current
       );
 
-      setConversationId(response.conversation_id);
+      const activeId = response.conversation_id;
 
-      // Persist the active conversation securely.
-      await window.edith.setActiveConversation(
-        response.conversation_id
-      );
+      updateConversationId(activeId);
+
+      await window.edith.setActiveConversation(activeId);
 
       setMessages((previous) => [
         ...previous,
@@ -210,12 +316,14 @@ function Chat() {
           id: Date.now() + 1,
           role: "assistant",
           content: response.message,
-          status: response.status
-        }
+          status: response.status,
+        },
       ]);
 
       await loadConversations();
 
+      // Analyze in the background so chat does not wait for memory analysis.
+      void requestMemorySuggestion(activeId);
     } catch (error) {
       setMessages((previous) => [
         ...previous,
@@ -223,18 +331,72 @@ function Chat() {
           id: Date.now() + 1,
           role: "assistant",
           content: error.message || "Unable to connect to E.D.I.T.H.",
-          status: "error"
-        }
+          status: "error",
+        },
       ]);
     } finally {
       setLoading(false);
     }
   }
 
+  // Save only after explicit user approval.
+  async function handleSaveMemory() {
+    if (!memorySuggestion || savingMemory) return;
+
+    const suggestion = memorySuggestion;
+
+    setSavingMemory(true);
+    setMemoryNotice("");
+
+    try {
+      await createMemory(
+        suggestion.content,
+        suggestion.category
+      );
+
+      setMemorySuggestion(null);
+      setMemoryNotice("Memory saved successfully.");
+
+      const key = suggestionKey(
+        suggestion.conversationId,
+        suggestion.content
+      );
+
+      setDismissedSuggestions((previous) => {
+        const updated = new Set(previous);
+        updated.add(key);
+        return updated;
+      });
+    } catch (error) {
+      setMemoryNotice(error.message || "Unable to save memory.");
+    } finally {
+      setSavingMemory(false);
+    }
+  }
+
+  // Reject a suggestion without saving it.
+  function handleRejectMemory() {
+    if (!memorySuggestion) return;
+
+    const key = suggestionKey(
+      memorySuggestion.conversationId,
+      memorySuggestion.content
+    );
+
+    setDismissedSuggestions((previous) => {
+      const updated = new Set(previous);
+      updated.add(key);
+      return updated;
+    });
+
+    setMemorySuggestion(null);
+    setMemoryNotice("Memory suggestion dismissed.");
+  }
+
   function handleKeyDown(event) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      handleSend();
+      handleSend(event);
     }
   }
 
@@ -243,17 +405,15 @@ function Chat() {
 
     return new Date(dateString).toLocaleDateString([], {
       day: "2-digit",
-      month: "short"
+      month: "short",
     });
   }
 
   return (
     <section className="chat-page">
-
       <div className="chat-layout">
 
         <aside className="chat-sidebar">
-
           <div className="sidebar-header">
             <h3>HISTORY</h3>
 
@@ -267,7 +427,6 @@ function Chat() {
           </div>
 
           <div className="conversation-list">
-
             {historyLoading && (
               <p className="history-message">
                 Loading conversations...
@@ -309,7 +468,9 @@ function Chat() {
 
                 <button
                   className="delete-conversation"
-                  onClick={() => handleDeleteConversation(conversation.id)}
+                  onClick={() =>
+                    handleDeleteConversation(conversation.id)
+                  }
                   disabled={loading}
                   title="Delete conversation"
                 >
@@ -317,13 +478,10 @@ function Chat() {
                 </button>
               </div>
             ))}
-
           </div>
-
         </aside>
 
         <div className="chat-main">
-
           <header className="chat-header">
             <div>
               <h2>AI CONVERSATION</h2>
@@ -340,14 +498,12 @@ function Chat() {
           </header>
 
           <div className="chat-messages">
-
             {messages.map((message) => (
               <div
                 key={message.id}
                 className={`message-row ${message.role}`}
               >
                 <div className="message-content">
-
                   <span className="message-author">
                     {message.role === "assistant" ? "E.D.I.T.H" : "YOU"}
                   </span>
@@ -361,7 +517,6 @@ function Chat() {
                       CONNECTION ERROR
                     </span>
                   )}
-
                 </div>
               </div>
             ))}
@@ -378,11 +533,55 @@ function Chat() {
               </div>
             )}
 
-            <div ref={messagesEndRef} />
+            {suggestionLoading && (
+              <div className="memory-suggestion-loading">
+                Checking for useful memory suggestions...
+              </div>
+            )}
 
+            {memorySuggestion && (
+              <div className="memory-suggestion-card">
+                <div className="memory-suggestion-heading">
+                  <strong>E.D.I.T.H. MEMORY SUGGESTION</strong>
+                  <span>NEW</span>
+                </div>
+
+                <p>{memorySuggestion.content}</p>
+
+                <small>
+                  Category: {memorySuggestion.category}
+                </small>
+
+                <div className="memory-suggestion-actions">
+                  <button
+                    type="button"
+                    onClick={handleSaveMemory}
+                    disabled={savingMemory}
+                  >
+                    {savingMemory ? "SAVING..." : "SAVE TO MEMORY"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleRejectMemory}
+                    disabled={savingMemory}
+                  >
+                    REJECT
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {memoryNotice && (
+              <div className="memory-notice">
+                {memoryNotice}
+              </div>
+            )}
+
+            <div ref={messagesEndRef} />
           </div>
 
-          <div className="chat-input-area">
+          <form className="chat-input-area" onSubmit={handleSend}>
             <textarea
               value={input}
               onChange={(event) => setInput(event.target.value)}
@@ -393,22 +592,19 @@ function Chat() {
             />
 
             <button
+              type="submit"
               className="send-button"
-              onClick={handleSend}
               disabled={!input.trim() || loading}
             >
-              SEND
+              {loading ? "SENDING..." : "SEND"}
             </button>
-          </div>
+          </form>
 
           <p className="chat-disclaimer">
             E.D.I.T.H AI MODEL IS UNDER DEVELOPMENT
           </p>
-
         </div>
-
       </div>
-
     </section>
   );
 }

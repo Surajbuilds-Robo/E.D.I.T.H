@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld("edith", {
   appName: "E.D.I.T.H",
   version: "0.1.0",
 
-  // Secure active conversation storage
+  // Active conversation storage
   getActiveConversation: () =>
     ipcRenderer.invoke("edith:get-active-conversation"),
 
@@ -17,5 +17,15 @@ contextBridge.exposeInMainWorld("edith", {
     ),
 
   clearActiveConversation: () =>
-    ipcRenderer.invoke("edith:clear-active-conversation")
+    ipcRenderer.invoke("edith:clear-active-conversation"),
+
+  // Secure authentication session storage
+  getAuthSession: () =>
+    ipcRenderer.invoke("edith:get-auth-session"),
+
+  setAuthSession: (session) =>
+    ipcRenderer.invoke("edith:set-auth-session", session),
+
+  clearAuthSession: () =>
+    ipcRenderer.invoke("edith:clear-auth-session"),
 });

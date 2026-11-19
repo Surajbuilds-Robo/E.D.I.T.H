@@ -33,6 +33,11 @@ class User(Base):
         cascade="all, delete-orphan",
     )
 
+    memories: Mapped[list["UserMemory"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
 
 class Conversation(Base):
     __tablename__ = "conversations"
@@ -88,3 +93,96 @@ class Message(Base):
     conversation: Mapped["Conversation"] = relationship(
         back_populates="messages"
     )
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    refresh_token_hash: Mapped[str] = mapped_column(
+        String(64),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    device_name: Mapped[str | None] = mapped_column(
+        String(150),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
+class UserMemory(Base):
+    __tablename__ = "user_memories"
+
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('preference', 'personal_context', 'project', 'other')",
+            name="check_memory_category",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+
+    category: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="other",
+    )
+
+    source_conversation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    user: Mapped["User"] = relationship(back_populates="memories")
