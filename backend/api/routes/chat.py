@@ -3,7 +3,7 @@ import re
 
 from difflib import SequenceMatcher
 from datetime import datetime, timezone
-
+from sqlalchemy import or_
 import httpx
 
 from fastapi import APIRouter, Depends, HTTPException

@@ -42,9 +42,17 @@ function Chat() {
   const messagesEndRef = useRef(null);
   const conversationIdRef = useRef(null);
 
+  // Identifies the latest memory-suggestion request.
+  const suggestionRequestRef = useRef(0);
+
   function updateConversationId(id) {
     conversationIdRef.current = id;
     setConversationId(id);
+  }
+
+  function cancelSuggestionRequest() {
+    suggestionRequestRef.current += 1;
+    setSuggestionLoading(false);
   }
 
   function suggestionKey(id, content) {
@@ -70,6 +78,8 @@ function Chat() {
   async function requestMemorySuggestion(id) {
     if (!id || conversationIdRef.current !== id) return;
 
+    const requestId = ++suggestionRequestRef.current;
+
     setSuggestionLoading(true);
     setMemorySuggestion(null);
     setMemoryNotice("");
@@ -77,7 +87,10 @@ function Chat() {
     try {
       const result = await getMemorySuggestion(id);
 
-      // Ignore results belonging to a conversation that is no longer open.
+      // Ignore outdated requests.
+      if (suggestionRequestRef.current !== requestId) return;
+
+      // Ignore results belonging to another conversation.
       if (conversationIdRef.current !== id) return;
 
       const suggestion = result?.suggestion;
@@ -101,7 +114,8 @@ function Chat() {
     } catch (error) {
       console.error("Memory suggestion failed:", error);
     } finally {
-      if (conversationIdRef.current === id) {
+      // Only the latest request may change the loading state.
+      if (suggestionRequestRef.current === requestId) {
         setSuggestionLoading(false);
       }
     }
@@ -190,6 +204,10 @@ function Chat() {
   async function openConversation(id) {
     if (loading) return;
 
+    cancelSuggestionRequest();
+    setMemorySuggestion(null);
+    setMemoryNotice("");
+
     try {
       const data = await getConversation(id);
 
@@ -204,9 +222,6 @@ function Chat() {
         }))
       );
 
-      setMemorySuggestion(null);
-      setMemoryNotice("");
-
       await window.edith.setActiveConversation(data.id);
       setHistoryError("");
     } catch (error) {
@@ -217,6 +232,8 @@ function Chat() {
   // Start a new conversation.
   async function startNewChat() {
     if (loading) return;
+
+    cancelSuggestionRequest();
 
     try {
       await window.edith.clearActiveConversation();
@@ -234,7 +251,6 @@ function Chat() {
       setInput("");
       setMemorySuggestion(null);
       setMemoryNotice("");
-      setSuggestionLoading(false);
       setHistoryError("");
     } catch (error) {
       setHistoryError("Unable to clear the saved conversation.");
@@ -256,6 +272,8 @@ function Chat() {
       await deleteConversation(id);
 
       if (conversationIdRef.current === id) {
+        cancelSuggestionRequest();
+
         await window.edith.clearActiveConversation();
 
         updateConversationId(null);
@@ -285,6 +303,9 @@ function Chat() {
     const text = input.trim();
 
     if (!text || loading) return;
+
+    // Invalidate any previous suggestion request.
+    cancelSuggestionRequest();
 
     const userMessage = {
       id: Date.now(),

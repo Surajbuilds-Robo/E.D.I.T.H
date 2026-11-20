@@ -148,6 +148,14 @@ class UserMemory(Base):
             "category IN ('preference', 'personal_context', 'project', 'other')",
             name="check_memory_category",
         ),
+        CheckConstraint(
+            "importance IN ('critical', 'high', 'normal', 'low')",
+            name="check_memory_importance",
+        ),
+        CheckConstraint(
+            "usage_count >= 0",
+            name="check_memory_usage_count",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -166,10 +174,34 @@ class UserMemory(Base):
         default="other",
     )
 
+    importance: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="normal",
+        server_default="normal",
+    )
+
     source_conversation_id: Mapped[int | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
+    )
+
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    usage_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
     )
 
     created_at: Mapped[datetime] = mapped_column(

@@ -334,11 +334,17 @@ export async function checkDuplicateMemory(content) {
 // ==============================
 
 export async function getMemorySuggestion(conversationId) {
-  return apiRequest(
+  console.log("[EDITH] Requesting memory suggestion:", conversationId);
+
+  const result = await apiRequest(
     `/api/v1/chat/conversations/${conversationId}/memory-suggestion`,
     {
       method: "POST",
     },
     true
   );
+
+  console.log("[EDITH] Memory suggestion response:", result);
+
+  return result;
 }

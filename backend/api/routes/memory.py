@@ -25,6 +25,13 @@ ALLOWED_CATEGORIES = {
     "other",
 }
 
+ALLOWED_IMPORTANCE = {
+    "critical",
+    "high",
+    "normal",
+    "low",
+}
+
 DUPLICATE_THRESHOLD = 0.78
 MAX_DUPLICATE_RESULTS = 5
 MAX_MEMORIES_TO_COMPARE = 200
@@ -37,6 +44,8 @@ MAX_MEMORIES_TO_COMPARE = 200
 class MemoryCreate(BaseModel):
     content: str = Field(min_length=1, max_length=10000)
     category: str = "other"
+    importance: str = "normal"
+    expires_at: datetime | None = None
     source_conversation_id: int | None = None
 
 
@@ -47,6 +56,8 @@ class MemoryUpdate(BaseModel):
         max_length=10000,
     )
     category: str | None = None
+    importance: str | None = None
+    expires_at: datetime | None = None
 
 
 class MemoryResponse(BaseModel):
@@ -55,7 +66,11 @@ class MemoryResponse(BaseModel):
     id: int
     content: str
     category: str
+    importance: str
     source_conversation_id: int | None
+    expires_at: datetime | None
+    last_used_at: datetime | None
+    usage_count: int
     created_at: datetime
     updated_at: datetime
 
@@ -85,6 +100,14 @@ def validate_category(category: str):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Invalid memory category.",
+        )
+
+
+def validate_importance(importance: str):
+    if importance not in ALLOWED_IMPORTANCE:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid memory importance.",
         )
 
 
@@ -138,9 +161,7 @@ def check_duplicate_memory(
     user: User = Depends(get_current_user),
 ):
 
-    new_content = normalize_memory_content(
-        request.content
-    )
+    new_content = normalize_memory_content(request.content)
 
     if not new_content:
         raise HTTPException(
@@ -226,6 +247,7 @@ def create_memory(
         )
 
     validate_category(request.category)
+    validate_importance(request.importance)
 
     if request.source_conversation_id is not None:
 
@@ -250,6 +272,8 @@ def create_memory(
         user_id=user.id,
         content=content,
         category=request.category,
+        importance=request.importance,
+        expires_at=request.expires_at,
         source_conversation_id=request.source_conversation_id,
     )
 
@@ -318,9 +342,7 @@ def update_memory(
         db,
     )
 
-    changes = request.model_dump(
-        exclude_unset=True
-    )
+    changes = request.model_dump(exclude_unset=True)
 
     if not changes:
         raise HTTPException(
@@ -351,8 +373,24 @@ def update_memory(
             )
 
         validate_category(category)
-
         memory.category = category
+
+    if "importance" in changes:
+
+        importance = changes["importance"]
+
+        if importance is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Memory importance cannot be empty.",
+            )
+
+        validate_importance(importance)
+        memory.importance = importance
+
+    if "expires_at" in changes:
+        # Explicit null removes the expiration date.
+        memory.expires_at = changes["expires_at"]
 
     db.commit()
     db.refresh(memory)
