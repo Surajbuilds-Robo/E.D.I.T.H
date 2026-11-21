@@ -328,6 +328,119 @@ export async function checkDuplicateMemory(content) {
   );
 }
 
+// ==============================
+// MEMORY CONSOLIDATION
+// ==============================
+
+export async function getConsolidationProposals() {
+  return apiRequest(
+    "/api/v1/memory/consolidate/proposals",
+    {
+      method: "POST",
+    },
+    true
+  );
+}
+
+export async function applyConsolidationProposal(proposalData) {
+  return apiRequest(
+    "/api/v1/memory/consolidate/apply",
+    {
+      method: "POST",
+      body: JSON.stringify(proposalData),
+    },
+    true
+  );
+}
+
+export async function restoreConsolidatedMemory(consolidatedMemoryId) {
+  return apiRequest(
+    `/api/v1/memory/consolidate/${consolidatedMemoryId}/restore`,
+    {
+      method: "POST",
+    },
+    true
+  );
+}
+
+// ==============================
+// MEMORY RETENTION AND CLEANUP
+// ==============================
+
+export async function getMemoryCleanupReview(includeAi = true) {
+  return apiRequest(
+    `/api/v1/memory/cleanup/review?include_ai=${includeAi}`,
+    {},
+    true
+  );
+}
+
+// ==============================
+// MEMORY SEARCH, EXPORT & IMPORT
+// ==============================
+
+export async function searchMemories(params = {}) {
+  const query = new URLSearchParams();
+  if (params.q) query.set("q", params.q);
+  if (params.category && params.category !== "all") query.set("category", params.category);
+  if (params.importance && params.importance !== "all") query.set("importance", params.importance);
+  if (params.status && params.status !== "all") query.set("status", params.status);
+  if (params.sort_by) query.set("sort_by", params.sort_by);
+  if (params.sort_order) query.set("sort_order", params.sort_order);
+  if (params.page) query.set("page", params.page);
+  if (params.page_size) query.set("page_size", params.page_size);
+
+  return apiRequest(
+    `/api/v1/memory/search?${query.toString()}`,
+    {},
+    true
+  );
+}
+
+export async function exportMemoriesJson() {
+  return apiRequest(
+    "/api/v1/memory/export/json",
+    {},
+    true
+  );
+}
+
+export async function exportMemoriesCsv() {
+  const session = getCurrentSession();
+  const token = session?.access_token || "";
+  const response = await fetch(`${API_BASE_URL}/api/v1/memory/export/csv`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`CSV export failed with status ${response.status}.`);
+  }
+  return response.text();
+}
+
+export async function previewMemoryImport(format, data) {
+  return apiRequest(
+    "/api/v1/memory/import/preview",
+    {
+      method: "POST",
+      body: JSON.stringify({ format, data }),
+    },
+    true
+  );
+}
+
+export async function confirmMemoryImport(records, skipDuplicates = true) {
+  return apiRequest(
+    "/api/v1/memory/import/confirm",
+    {
+      method: "POST",
+      body: JSON.stringify({ records, skip_duplicates: skipDuplicates }),
+    },
+    true
+  );
+}
+
 
 // ==============================
 // MEMORY SUGGESTIONS

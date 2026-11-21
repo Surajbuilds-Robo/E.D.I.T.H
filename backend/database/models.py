@@ -204,6 +204,25 @@ class UserMemory(Base):
         server_default="0",
     )
 
+    is_archived: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+        nullable=False,
+        index=True,
+    )
+
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    consolidated_into_id: Mapped[int | None] = mapped_column(
+        ForeignKey("user_memories.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

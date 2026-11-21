@@ -1,14 +1,17 @@
+
 import json
 import re
 
 from difflib import SequenceMatcher
 from datetime import datetime, timezone
+
 from sqlalchemy import or_
+from sqlalchemy.orm import Session
+
 import httpx
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
-from sqlalchemy.orm import Session
 
 from backend.api.auth_dependencies import get_current_user
 from backend.database.connection import get_db
@@ -178,25 +181,31 @@ def calculate_memory_relevance(
     return min(score, 1.0)
 
 
+
 def get_memory_context(
     db: Session,
     user_id: int,
     query: str,
 ) -> str:
     """
-    Retrieve the most relevant approved memories for this user.
-
-    Only preference and project memories are included.
+    Retrieve relevant, non-expired memories and track their usage.
     """
+
+    current_time = datetime.now(timezone.utc)
 
     memories = (
         db.query(UserMemory)
         .filter(
             UserMemory.user_id == user_id,
+            UserMemory.is_archived.is_(False),
             UserMemory.category.in_([
                 "preference",
                 "project",
             ]),
+            or_(
+                UserMemory.expires_at.is_(None),
+                UserMemory.expires_at > current_time,
+            ),
         )
         .order_by(
             UserMemory.updated_at.desc(),
@@ -224,7 +233,6 @@ def get_memory_context(
             category=memory.category,
         )
 
-        # Ignore memories with very low relevance.
         if relevance < 0.12:
             continue
 
@@ -236,8 +244,6 @@ def get_memory_context(
     if not ranked_memories:
         return ""
 
-    # Highest relevance first.
-    # Newer memories win when relevance scores are equal.
     ranked_memories.sort(
         key=lambda item: (
             item["relevance"],
@@ -251,6 +257,7 @@ def get_memory_context(
 
     memory_data = []
     remaining_characters = 3000
+    used_memories = []
 
     for item in selected_memories:
 
@@ -267,10 +274,19 @@ def get_memory_context(
             "content": content,
         })
 
+        used_memories.append(memory)
+
         remaining_characters -= len(content)
 
     if not memory_data:
         return ""
+
+    # Update usage metadata for memories included in context.
+    for memory in used_memories:
+        memory.usage_count = (memory.usage_count or 0) + 1
+        memory.last_used_at = current_time
+
+    db.commit()
 
     serialized_memories = json.dumps(
         memory_data,
@@ -284,6 +300,7 @@ def get_memory_context(
         "Use only memories relevant to the current request:\n"
         f"{serialized_memories}"
     )
+
 
 
 # ==========================================
