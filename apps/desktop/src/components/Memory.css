@@ -1749,5 +1749,49 @@
   color: #e8f5ff;
 }
 
+.memory-badge-archived-linked {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  background: rgba(162, 155, 254, 0.12);
+  border: 1px solid #6c5ce7;
+  color: #a29bfe;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+}
+
+.memory-badge-archived-backup {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  background: rgba(225, 112, 85, 0.12);
+  border: 1px solid #d63031;
+  color: #fab1a0;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+}
+
+.memory-unarchive-button {
+  padding: 6px 12px;
+  background: rgba(85, 239, 196, 0.1);
+  border: 1px solid #1b7a5a;
+  color: #55efc4;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+  transition: all 0.2s ease;
+}
+
+.memory-unarchive-button:hover {
+  background: rgba(85, 239, 196, 0.25);
+  border-color: #55efc4;
+}
+
 
 

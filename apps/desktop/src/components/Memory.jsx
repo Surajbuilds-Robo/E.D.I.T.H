@@ -16,6 +16,7 @@ import {
   exportMemoriesCsv,
   previewMemoryImport,
   confirmMemoryImport,
+  unarchiveMemory,
 } from "../services/api";
 
 import "./Memory.css";
@@ -302,11 +303,14 @@ function Memory() {
     const validRecords = importPreview.records
       .filter((r) => r.is_valid && (!skipDuplicates || !r.is_duplicate))
       .map((r) => ({
+        id: r.id,
         content: r.content,
         category: r.category,
         importance: r.importance,
         expires_at: r.expires_at,
         is_archived: r.is_archived,
+        archived_at: r.archived_at,
+        consolidated_into_id: r.consolidated_into_id,
         usage_count: r.usage_count,
       }));
 
@@ -337,6 +341,18 @@ function Memory() {
       setImportError(err.message || "Failed to import memories.");
     } finally {
       setImporting(false);
+    }
+  }
+
+  async function handleUnarchive(memoryId) {
+    setError("");
+    setSuccess("");
+    try {
+      await unarchiveMemory(memoryId);
+      setSuccess(`Archived memory #${memoryId} restored to active status.`);
+      await loadMemories();
+    } catch (err) {
+      setError(err.message || "Failed to activate archived memory.");
     }
   }
 
@@ -1297,7 +1313,7 @@ function Memory() {
                             <td>{formatLabel(rec.category || "other")}</td>
                             <td>{formatLabel(rec.importance || "normal")}</td>
                             <td className="import-col-details">
-                              {rec.reason || (rec.is_duplicate ? `Matches existing #${rec.duplicate_of_id}` : "Ready to import")}
+                              {rec.validation_error || (rec.is_duplicate ? "Duplicate of active memory" : (rec.lineage_status ? `Valid (${formatLabel(rec.lineage_status)})` : "Ready to import"))}
                             </td>
                           </tr>
                         ))}
@@ -1527,6 +1543,24 @@ function Memory() {
                           CONSOLIDATED
                         </span>
                       )}
+
+                      {memory.is_archived && (
+                        memory.consolidated_into_id ? (
+                          <span
+                            className="memory-badge-archived-linked"
+                            title={`Archived into consolidated memory #${memory.consolidated_into_id}. Restore memory #${memory.consolidated_into_id} to restore this memory.`}
+                          >
+                            ARCHIVED (LINKED #{memory.consolidated_into_id})
+                          </span>
+                        ) : (
+                          <span
+                            className="memory-badge-archived-backup"
+                            title="Independent archived backup. Can be activated directly."
+                          >
+                            ARCHIVED (BACKUP)
+                          </span>
+                        )
+                      )}
                     </div>
 
                     <span className="memory-id">
@@ -1552,6 +1586,17 @@ function Memory() {
                           title="Restore original memories and delete this consolidated memory"
                         >
                           RESTORE ORIGINALS
+                        </button>
+                      )}
+
+                      {memory.is_archived && !memory.consolidated_into_id && (
+                        <button
+                          type="button"
+                          className="memory-unarchive-button"
+                          onClick={() => handleUnarchive(memory.id)}
+                          title="Activate this independent archived backup memory"
+                        >
+                          ACTIVATE BACKUP
                         </button>
                       )}
 

@@ -441,6 +441,16 @@ export async function confirmMemoryImport(records, skipDuplicates = true) {
   );
 }
 
+export async function unarchiveMemory(memoryId) {
+  return apiRequest(
+    `/api/v1/memory/${memoryId}/unarchive`,
+    {
+      method: "POST",
+    },
+    true
+  );
+}
+
 
 // ==============================
 // MEMORY SUGGESTIONS

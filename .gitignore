@@ -31,3 +31,4 @@ backups/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+tests

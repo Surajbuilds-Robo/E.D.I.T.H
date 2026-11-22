@@ -14,14 +14,14 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import case, or_
+from sqlalchemy import case, or_, text
 from sqlalchemy.orm import Session
 
 from backend.database.connection import get_db
 from backend.database.models import User, UserMemory
 from backend.api.auth_dependencies import get_current_user
 from backend.services.ollama import generate_json
-
+from backend.services.memory_lock import acquire_user_memory_lock
 logger = logging.getLogger(__name__)
 
 
@@ -417,7 +417,6 @@ def create_memory(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-
     content = request.content.strip()
 
     if not content:
@@ -430,7 +429,6 @@ def create_memory(
     validate_importance(request.importance)
 
     if request.source_conversation_id is not None:
-
         from backend.database.models import Conversation
 
         conversation = (
@@ -448,6 +446,9 @@ def create_memory(
                 detail="Source conversation not found.",
             )
 
+    # Serialize memory writes for this user.
+    acquire_user_memory_lock(db, user.id)
+
     memory = UserMemory(
         user_id=user.id,
         content=content,
@@ -457,11 +458,17 @@ def create_memory(
         source_conversation_id=request.source_conversation_id,
     )
 
-    db.add(memory)
-    db.commit()
-    db.refresh(memory)
+    try:
+        db.add(memory)
+        db.commit()
+        db.refresh(memory)
+
+    except Exception:
+        db.rollback()
+        raise
 
     return memory
+
 
 
 # ==========================================
@@ -1049,21 +1056,27 @@ def export_memories_csv(
 # ==========================================
 
 class MemoryImportPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     format: str = Field(default="json", description="'json' or 'csv'")
     data: str = Field(min_length=1, description="Raw file contents")
 
 
 class ImportPreviewItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     index: int
+    id: int | None = None
     content: str
     category: str
     importance: str
     is_archived: bool = False
+    archived_at: datetime | None = None
+    consolidated_into_id: int | None = None
     expires_at: datetime | None = None
     usage_count: int = 0
     is_valid: bool
     is_duplicate: bool
     validation_error: str | None = None
+    lineage_status: str | None = None
 
 
 class MemoryImportPreviewResponse(BaseModel):
@@ -1075,15 +1088,20 @@ class MemoryImportPreviewResponse(BaseModel):
 
 
 class ImportRecordInput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: int | None = None
     content: str
     category: str = "other"
     importance: str = "normal"
     expires_at: datetime | None = None
     is_archived: bool = False
+    archived_at: datetime | None = None
+    consolidated_into_id: int | None = None
     usage_count: int = 0
 
 
 class MemoryImportConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     records: list[ImportRecordInput]
     skip_duplicates: bool = True
 
@@ -1104,7 +1122,8 @@ def preview_memory_import(
 ):
     """
     Validate and preview memories from JSON or CSV without writing to the database.
-    Identifies invalid records and duplicates against existing memories.
+    Identifies invalid records, duplicates against active memories, and consolidation lineage.
+    Enforces upload size (2MB) and count (1000) limits.
     """
     if len(request.data.encode("utf-8")) > 2 * 1024 * 1024:
         raise HTTPException(
@@ -1144,13 +1163,43 @@ def preview_memory_import(
             detail="Unsupported format. Must be 'json' or 'csv'.",
         )
 
+    if not raw_records:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No records found in import data.",
+        )
+
     if len(raw_records) > 1000:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Import exceeds maximum limit of 1000 records.",
         )
 
-    # Fetch existing active memory content hashes for duplicate detection
+    # First pass: Identify candidate non-archived parent IDs in the batch
+    parent_batch_ids = set()
+    for raw in raw_records:
+        if isinstance(raw, dict):
+            raw_id = raw.get("id")
+            raw_arch = str(raw.get("is_archived", "")).strip().lower() in ("true", "1", "yes")
+            if raw_id is not None and not raw_arch:
+                try:
+                    parent_batch_ids.add(int(raw_id))
+                except (ValueError, TypeError):
+                    pass
+
+    # Find IDs referenced as consolidated_into_id by archived records in the batch
+    referenced_parent_ids = set()
+    for raw in raw_records:
+        if isinstance(raw, dict):
+            raw_cons = raw.get("consolidated_into_id")
+            raw_arch = str(raw.get("is_archived", "")).strip().lower() in ("true", "1", "yes")
+            if raw_cons is not None and raw_arch:
+                try:
+                    referenced_parent_ids.add(int(raw_cons))
+                except (ValueError, TypeError):
+                    pass
+
+    # Fetch existing active memory content for duplicate detection
     existing_memories = (
         db.query(UserMemory.content)
         .filter(
@@ -1160,7 +1209,7 @@ def preview_memory_import(
         .all()
     )
     existing_normalized = {
-        m[0].strip().casefold()
+        normalize_memory_content(m[0])
         for m in existing_memories
         if m[0]
     }
@@ -1189,6 +1238,30 @@ def preview_memory_import(
         raw_usage = raw.get("usage_count", 0)
         raw_expires = raw.get("expires_at")
         raw_archived = raw.get("is_archived", False)
+        raw_id = raw.get("id")
+        raw_cons_id = raw.get("consolidated_into_id")
+        raw_archived_at = raw.get("archived_at")
+
+        parsed_id = None
+        if raw_id is not None:
+            try:
+                parsed_id = int(raw_id)
+            except (ValueError, TypeError):
+                pass
+
+        parsed_cons_id = None
+        if raw_cons_id is not None and str(raw_cons_id).strip():
+            try:
+                parsed_cons_id = int(raw_cons_id)
+            except (ValueError, TypeError):
+                pass
+
+        parsed_archived_at = None
+        if raw_archived_at and str(raw_archived_at).strip():
+            try:
+                parsed_archived_at = datetime.fromisoformat(str(raw_archived_at).strip().replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                pass
 
         is_valid = True
         err_msg = None
@@ -1240,26 +1313,49 @@ def preview_memory_import(
         if str(raw_archived).strip().lower() in ("true", "1", "yes"):
             is_archived_bool = True
 
-        # Duplicate check (case-insensitive normalized content)
-        is_dup = False
+        # Archival metadata consistency check
         if is_valid:
-            norm_content = raw_content.casefold()
+            if not is_archived_bool and parsed_cons_id is not None:
+                is_valid = False
+                err_msg = "Non-archived memory cannot have a consolidated_into_id."
+            elif not is_archived_bool and parsed_archived_at is not None:
+                is_valid = False
+                err_msg = "Non-archived memory cannot have an archived_at timestamp."
+
+        # Duplicate check (case-insensitive normalized content against live active memories)
+        is_dup = False
+        if is_valid and not is_archived_bool:
+            norm_content = normalize_memory_content(raw_content)
             if norm_content in existing_normalized or norm_content in seen_in_batch:
                 is_dup = True
             seen_in_batch.add(norm_content)
 
+        # Lineage classification
+        lineage_status = "active"
+        if is_archived_bool:
+            if parsed_cons_id is not None and parsed_cons_id in parent_batch_ids:
+                lineage_status = f"linked_archived (consolidated into #{parsed_cons_id})"
+            else:
+                lineage_status = "independent_archived (backup)"
+        elif parsed_id is not None and parsed_id in referenced_parent_ids:
+            lineage_status = "consolidated_parent"
+
         preview_items.append(
             ImportPreviewItem(
                 index=idx,
+                id=parsed_id,
                 content=raw_content[:500],
                 category=raw_cat if raw_cat in ALLOWED_CATEGORIES else "other",
                 importance=raw_imp if raw_imp in ALLOWED_IMPORTANCE else "normal",
                 is_archived=is_archived_bool,
+                archived_at=parsed_archived_at,
+                consolidated_into_id=parsed_cons_id,
                 expires_at=parsed_expires,
                 usage_count=usage_val,
                 is_valid=is_valid,
                 is_duplicate=is_dup,
                 validation_error=err_msg,
+                lineage_status=lineage_status,
             )
         )
 
@@ -1285,7 +1381,9 @@ def confirm_memory_import(
     """
     Import validated memories into the authenticated user's knowledge base.
     Atomic transaction: rolls back completely on any database error.
-    Assigns user_id to authenticated user; decouples foreign keys safely.
+    Assigns user_id to authenticated user; re-validates all records server-side.
+    Preserves consolidation lineage when parent is present in the import batch;
+    otherwise saves archived records safely as independent backups.
     """
     if not request.records:
         raise HTTPException(
@@ -1295,13 +1393,25 @@ def confirm_memory_import(
 
     if len(request.records) > 1000:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Import exceeds maximum limit of 1000 records.",
         )
 
+    total_bytes = sum(len(r.content.encode("utf-8")) for r in request.records if r.content)
+    if total_bytes > 2 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Import payload exceeds 2MB limit.",
+        )
+
+    # Acquire per-user transaction advisory lock to prevent concurrent duplicate imports
+    # and guarantee race-safe duplicate checks under READ COMMITTED transaction isolation.
+    # Serialize imports with other memory writes for this user.
+    acquire_user_memory_lock(db, user.id)
+
     now = datetime.now(timezone.utc)
 
-    # Existing active content for duplicate filtering if requested
+    # Fresh query of live active memories for duplicate detection (executed AFTER lock is held)
     existing_memories = (
         db.query(UserMemory.content)
         .filter(
@@ -1311,60 +1421,58 @@ def confirm_memory_import(
         .all()
     )
     existing_normalized = {
-        m[0].strip().casefold()
+        normalize_memory_content(m[0])
         for m in existing_memories
         if m[0]
     }
 
-    to_insert = []
+    valid_active_records: list[ImportRecordInput] = []
+    valid_archived_records: list[ImportRecordInput] = []
     skipped_count = 0
     seen_in_batch = set()
 
     for r in request.records:
-        clean_content = r.content.strip()
-        if not clean_content:
+        clean_content = r.content.strip() if r.content else ""
+        if not clean_content or len(clean_content) > 10000:
             skipped_count += 1
             continue
 
-        cat = r.category.strip().lower()
+        cat = r.category.strip().lower() if r.category else ""
         if cat not in ALLOWED_CATEGORIES:
-            cat = "other"
-
-        imp = r.importance.strip().lower()
-        if imp not in ALLOWED_IMPORTANCE:
-            imp = "normal"
-
-        usage = max(0, r.usage_count or 0)
-
-        # Check duplicate
-        norm_content = clean_content.casefold()
-        if request.skip_duplicates and (norm_content in existing_normalized or norm_content in seen_in_batch):
             skipped_count += 1
             continue
 
-        seen_in_batch.add(norm_content)
+        imp = r.importance.strip().lower() if r.importance else ""
+        if imp not in ALLOWED_IMPORTANCE:
+            skipped_count += 1
+            continue
 
-        # Safety strategy for archived memories:
-        # If is_archived is True, preserve archived_at timestamp.
-        # Set consolidated_into_id to None to guarantee no broken foreign key references
-        # point to non-existent or foreign records from previous backups.
+        if r.usage_count is None or r.usage_count < 0:
+            skipped_count += 1
+            continue
+
         is_arch = bool(r.is_archived)
-        arch_at = now if is_arch else None
 
-        mem = UserMemory(
-            user_id=user.id,
-            content=clean_content,
-            category=cat,
-            importance=imp,
-            expires_at=r.expires_at,
-            is_archived=is_arch,
-            archived_at=arch_at,
-            consolidated_into_id=None,
-            usage_count=usage,
-        )
-        to_insert.append(mem)
+        # Archival metadata consistency: active memory cannot have consolidated_into_id
+        if not is_arch and r.consolidated_into_id is not None:
+            skipped_count += 1
+            continue
 
-    if not to_insert:
+        # Duplicate check against live DB active memories and within batch
+        norm_content = normalize_memory_content(clean_content)
+        if not is_arch and request.skip_duplicates and (norm_content in existing_normalized or norm_content in seen_in_batch):
+            skipped_count += 1
+            continue
+
+        if not is_arch:
+            seen_in_batch.add(norm_content)
+
+        if is_arch:
+            valid_archived_records.append(r)
+        else:
+            valid_active_records.append(r)
+
+    if not valid_active_records and not valid_archived_records:
         return MemoryImportConfirmResponse(
             status="success",
             message=f"No new records to import ({skipped_count} skipped).",
@@ -1374,10 +1482,60 @@ def confirm_memory_import(
         )
 
     try:
-        db.add_all(to_insert)
+        batch_id_to_new_id = {}
+        inserted_active = []
+
+        # Pass 1: Insert active memories and potential consolidated parents first
+        for r in valid_active_records:
+            mem = UserMemory(
+                user_id=user.id,
+                content=r.content.strip(),
+                category=r.category.strip().lower(),
+                importance=r.importance.strip().lower(),
+                expires_at=r.expires_at,
+                is_archived=False,
+                archived_at=None,
+                consolidated_into_id=None,
+                usage_count=r.usage_count or 0,
+            )
+            db.add(mem)
+            inserted_active.append((r, mem))
+
+        if inserted_active:
+            db.flush()
+            for r, mem in inserted_active:
+                if r.id is not None:
+                    batch_id_to_new_id[r.id] = mem.id
+
+        # Pass 2: Insert archived memories, resolving consolidation lineage if parent is in batch
+        inserted_archived = []
+        for r in valid_archived_records:
+            arch_at = r.archived_at or now
+            parent_id = None
+            if r.consolidated_into_id is not None and r.consolidated_into_id in batch_id_to_new_id:
+                parent_id = batch_id_to_new_id[r.consolidated_into_id]
+
+            mem = UserMemory(
+                user_id=user.id,
+                content=r.content.strip(),
+                category=r.category.strip().lower(),
+                importance=r.importance.strip().lower(),
+                expires_at=r.expires_at,
+                is_archived=True,
+                archived_at=arch_at,
+                consolidated_into_id=parent_id,
+                usage_count=r.usage_count or 0,
+            )
+            db.add(mem)
+            inserted_archived.append(mem)
+
         db.commit()
-        for m in to_insert:
-            db.refresh(m)
+
+        for _, mem in inserted_active:
+            db.refresh(mem)
+        for mem in inserted_archived:
+            db.refresh(mem)
+
     except Exception as exc:
         db.rollback()
         logger.error(f"Failed to confirm memory import: {exc}")
@@ -1386,15 +1544,74 @@ def confirm_memory_import(
             detail=f"Database transaction failed during import: {exc}",
         )
 
-    imported_ids = [m.id for m in to_insert]
+    all_imported_ids = [mem.id for _, mem in inserted_active] + [mem.id for mem in inserted_archived]
 
     return MemoryImportConfirmResponse(
         status="success",
-        message=f"Successfully imported {len(to_insert)} memories ({skipped_count} skipped).",
-        imported_count=len(to_insert),
+        message=f"Successfully imported {len(all_imported_ids)} memories ({skipped_count} skipped).",
+        imported_count=len(all_imported_ids),
         skipped_count=skipped_count,
-        imported_ids=imported_ids,
+        imported_ids=all_imported_ids,
     )
+
+
+@router.post("/{memory_id}/unarchive", response_model=MemoryResponse)
+def unarchive_memory(
+    memory_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Restore an independent archived memory back to active status.
+    If the memory is part of an active consolidation, unarchiving is rejected;
+    the user must restore the parent consolidated memory instead.
+    """
+    # Serialize memory writes for this user.
+    acquire_user_memory_lock(db, user.id)
+    memory = (
+        db.query(UserMemory)
+        .filter(
+            UserMemory.id == memory_id,
+            UserMemory.user_id == user.id,
+        )
+        .with_for_update()
+        .first()
+    )
+    if not memory:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Memory not found.",
+        )
+
+    if not memory.is_archived:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Memory is already active and not archived.",
+        )
+
+    # If linked to an active consolidated parent:
+    if memory.consolidated_into_id is not None:
+        parent = (
+            db.query(UserMemory)
+            .filter(
+                UserMemory.id == memory.consolidated_into_id,
+                UserMemory.user_id == user.id,
+            )
+            .first()
+        )
+        if parent:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"This memory was archived into consolidated memory #{memory.consolidated_into_id}. Restore memory #{memory.consolidated_into_id} to restore this memory.",
+            )
+
+    memory.is_archived = False
+    memory.archived_at = None
+    memory.consolidated_into_id = None
+    db.commit()
+    db.refresh(memory)
+
+    return memory_to_response(memory, set())
 
 # ==========================================
 # GET SINGLE MEMORY
@@ -1433,6 +1650,7 @@ def read_memory(
 # UPDATE MEMORY
 # ==========================================
 
+
 @router.put("/{memory_id}", response_model=MemoryResponse)
 def update_memory(
     memory_id: int,
@@ -1440,13 +1658,6 @@ def update_memory(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-
-    memory = get_owned_memory(
-        memory_id,
-        user,
-        db,
-    )
-
     changes = request.model_dump(exclude_unset=True)
 
     if not changes:
@@ -1455,8 +1666,16 @@ def update_memory(
             detail="No changes provided.",
         )
 
-    if "content" in changes:
+    # Serialize memory writes for this user before reading the memory row.
+    acquire_user_memory_lock(db, user.id)
 
+    memory = get_owned_memory(
+        memory_id,
+        user,
+        db,
+    )
+
+    if "content" in changes:
         content = changes["content"]
 
         if content is None or not content.strip():
@@ -1468,7 +1687,6 @@ def update_memory(
         memory.content = content.strip()
 
     if "category" in changes:
-
         category = changes["category"]
 
         if category is None:
@@ -1481,7 +1699,6 @@ def update_memory(
         memory.category = category
 
     if "importance" in changes:
-
         importance = changes["importance"]
 
         if importance is None:
@@ -1497,10 +1714,16 @@ def update_memory(
         # Explicit null removes the expiration date.
         memory.expires_at = changes["expires_at"]
 
-    db.commit()
-    db.refresh(memory)
+    try:
+        db.commit()
+        db.refresh(memory)
+
+    except Exception:
+        db.rollback()
+        raise
 
     return memory
+
 
 
 # ==========================================
@@ -1974,7 +2197,8 @@ def apply_consolidation_proposal(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="At least two distinct original memories are required for consolidation.",
         )
-
+        # Serialize memory writes for this user before reading source memories.
+    acquire_user_memory_lock(db, user.id)
     # Fetch original memories verifying user ownership with row-level locking
     fetched = (
         db.query(UserMemory)
@@ -2078,6 +2302,8 @@ def restore_consolidated_memory(
     Restore archived original memories and remove the consolidated memory.
     Fully reverses a previously applied consolidation.
     """
+    # Serialize memory writes for this user.
+    acquire_user_memory_lock(db, user.id)
     consolidated_memory = (
         db.query(UserMemory)
         .filter(
@@ -2148,6 +2374,8 @@ def delete_memory(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # Serialize memory writes for this user.
+    acquire_user_memory_lock(db, user.id)
 
     memory = get_owned_memory(
         memory_id,
