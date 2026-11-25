@@ -28,4 +28,24 @@ contextBridge.exposeInMainWorld("edith", {
 
   clearAuthSession: () =>
     ipcRenderer.invoke("edith:clear-auth-session"),
+
+  // Device identity
+  getDeviceId: () =>
+    ipcRenderer.invoke("edith:get-device-id"),
+
+  // Window management
+  minimizeWindow: () =>
+    ipcRenderer.invoke("edith:minimize-window"),
+
+  maximizeWindow: () =>
+    ipcRenderer.invoke("edith:maximize-window"),
+
+  closeWindow: () =>
+    ipcRenderer.invoke("edith:close-window"),
+
+  isMaximized: () =>
+    ipcRenderer.invoke("edith:is-maximized"),
+
+  getAppInfo: () =>
+    ipcRenderer.invoke("edith:get-app-info"),
 });

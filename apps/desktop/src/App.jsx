@@ -1,8 +1,13 @@
-
 import { useEffect, useState } from "react";
 
+import Titlebar from "./components/Titlebar";
 import Chat from "./components/Chat";
 import Memory from "./components/Memory";
+import Models from "./components/Models";
+import Settings from "./components/Settings";
+import SyncStatus from "./components/SyncStatus";
+
+import { startAutoSync, stopAutoSync } from "./services/sync";
 
 import {
   checkBackendHealth,
@@ -17,8 +22,9 @@ import {
 const sections = [
   "Home",
   "Chat",
-  "Agents",
   "Memory",
+  "Models",
+  "Agents",
   "Tasks",
   "Research",
   "Settings",
@@ -39,6 +45,16 @@ function App() {
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  // Theme management (dark by default)
+  const [theme, setTheme] = useState(() => {
+    return localStorage.getItem("edith_theme") || "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("edith_theme", theme);
+  }, [theme]);
+
   // =====================================
   // INITIALIZE BACKEND AND RESTORE SESSION
   // =====================================
@@ -56,7 +72,7 @@ function App() {
 
         if (!online) return;
 
-        const savedSession = await window.edith.getAuthSession();
+        const savedSession = await window.edith?.getAuthSession?.();
 
         if (!savedSession || !mounted) return;
 
@@ -72,7 +88,7 @@ function App() {
           console.error("Session restoration failed:", error);
 
           clearCurrentSession();
-          await window.edith.clearAuthSession();
+          await window.edith?.clearAuthSession?.();
 
           if (mounted) {
             setAuthError(
@@ -99,6 +115,14 @@ function App() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!authSession) return;
+    startAutoSync(60000);
+    return () => {
+      stopAutoSync();
+    };
+  }, [authSession]);
 
   // =====================================
   // LOGIN AND REGISTRATION
@@ -145,7 +169,7 @@ function App() {
         );
       }
 
-      await window.edith.setAuthSession(session);
+      await window.edith?.setAuthSession?.(session);
 
       setCurrentSession(session);
 
@@ -162,7 +186,7 @@ function App() {
     } catch (error) {
       clearCurrentSession();
 
-      await window.edith?.clearAuthSession();
+      await window.edith?.clearAuthSession?.();
 
       setAuthError(
         error.message || "Authentication failed."
@@ -187,8 +211,8 @@ function App() {
     clearCurrentSession();
 
     try {
-      await window.edith.clearAuthSession();
-      await window.edith.clearActiveConversation();
+      await window.edith?.clearAuthSession?.();
+      await window.edith?.clearActiveConversation?.();
     } catch (error) {
       console.error(
         "Secure storage cleanup failed:",
@@ -219,14 +243,11 @@ function App() {
   if (authLoading) {
     return (
       <main className="app">
+        <Titlebar title="E.D.I.T.H. — Initializing" />
         <section className="assistant">
           <p className="eyebrow">E.D.I.T.H SYSTEM</p>
-
           <h1>INITIALIZING...</h1>
-
-          <p className="subtitle">
-            Restoring your secure session.
-          </p>
+          <p className="subtitle">Restoring your secure session.</p>
         </section>
       </main>
     );
@@ -239,11 +260,10 @@ function App() {
   if (backendStatus === "offline") {
     return (
       <main className="app">
+        <Titlebar title="E.D.I.T.H. — Backend Offline" />
         <section className="assistant">
           <p className="eyebrow">SYSTEM STATUS</p>
-
           <h1>BACKEND OFFLINE</h1>
-
           <p className="subtitle">
             Start the Python backend and restart E.D.I.T.H.
           </p>
@@ -259,6 +279,8 @@ function App() {
   if (!authSession) {
     return (
       <main className="app">
+        <Titlebar title="E.D.I.T.H. — Secure Sign In" />
+
         <header className="topbar">
           <div className="brand">
             <span className="brand-dot" />
@@ -395,9 +417,10 @@ function App() {
 
   return (
     <main className="app">
+      {/* WINDOW TITLEBAR */}
+      <Titlebar title={`E.D.I.T.H. — ${activeSection}`} />
 
       {/* TOP NAVIGATION */}
-
       <header className="topbar">
         <div
           className="brand"
@@ -423,12 +446,13 @@ function App() {
           ))}
         </nav>
 
+        <SyncStatus />
+
         <div className="system-status">
           <span
             className="status-dot"
             style={{ background: "#48dfff" }}
           />
-
           {statusText}
         </div>
 
@@ -441,10 +465,8 @@ function App() {
       </header>
 
       {/* HOME MODULE */}
-
       {activeSection === "Home" ? (
         <section className="assistant">
-
           <p className="eyebrow">
             PERSONAL AI SYSTEM
           </p>
@@ -477,29 +499,29 @@ function App() {
           </p>
 
           <div className="platform-info">
-            PLATFORM: {window.edith?.platform || "UNKNOWN"}
+            PLATFORM: {window.edith?.platform || "WINDOWS x64"}
           </div>
-
         </section>
 
       ) : activeSection === "Chat" ? (
-
         /* CHAT MODULE */
-
         <Chat />
 
       ) : activeSection === "Memory" ? (
-
         /* MEMORY MODULE */
-
         <Memory />
 
+      ) : activeSection === "Models" ? (
+        /* AI MODELS & LOCAL OLLAMA MODULE */
+        <Models />
+
+      ) : activeSection === "Settings" ? (
+        /* APPLICATION SETTINGS MODULE */
+        <Settings currentTheme={theme} onThemeChange={setTheme} />
+
       ) : (
-
-        /* FUTURE MODULES */
-
+        /* FUTURE MODULES PLACEHOLDER */
         <section className="section-page">
-
           <p className="eyebrow">
             E.D.I.T.H SYSTEM
           </p>
@@ -513,7 +535,6 @@ function App() {
           </p>
 
           <div className="module-card">
-
             <div className="module-icon">
               ✦
             </div>
@@ -531,18 +552,14 @@ function App() {
             <span className="module-status">
               MODULE INITIALIZED
             </span>
-
           </div>
-
         </section>
       )}
 
       {/* FOOTER */}
-
       <footer>
         E.D.I.T.H © 2026 — PERSONAL INTELLIGENCE SYSTEM
       </footer>
-
     </main>
   );
 }

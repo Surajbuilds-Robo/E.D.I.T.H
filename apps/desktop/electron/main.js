@@ -3,11 +3,16 @@ const {
   app,
   BrowserWindow,
   ipcMain,
-  safeStorage
+  safeStorage,
+  Tray,
+  Menu,
+  nativeImage,
+  shell
 } = require("electron");
 
 const path = require("path");
 const fs = require("fs/promises");
+const crypto = require("crypto");
 
 const DEV_SERVER_URL = "http://127.0.0.1:5173";
 
@@ -21,6 +26,11 @@ const CONVERSATION_FILE = path.join(
 const AUTH_SESSION_FILE = path.join(
   USER_DATA,
   "auth-session.dat"
+);
+
+const DEVICE_ID_FILE = path.join(
+  USER_DATA,
+  "device-id.dat"
 );
 
 // ======================================
@@ -171,6 +181,30 @@ ipcMain.handle(
   }
 );
 
+ipcMain.handle(
+  "edith:get-device-id",
+  async (event) => {
+    verifyRenderer(event);
+    await ensureSecureStorage();
+
+    const encryptedData = await readEncryptedFile(DEVICE_ID_FILE);
+    if (encryptedData) {
+      try {
+        const decrypted = await safeStorage.decryptStringAsync(encryptedData);
+        if (typeof decrypted === "string" && decrypted.length >= 16) {
+          return decrypted;
+        }
+      } catch {
+        // Fall back to generating a fresh ID below
+      }
+    }
+
+    const newDeviceId = crypto.randomUUID();
+    await writeEncryptedFile(DEVICE_ID_FILE, newDeviceId);
+    return newDeviceId;
+  }
+);
+
 // ======================================
 // AUTHENTICATION SESSION STORAGE
 // ======================================
@@ -243,34 +277,151 @@ ipcMain.handle(
 );
 
 // ======================================
+// WINDOW MANAGEMENT IPC HANDLERS
+// ======================================
+
+ipcMain.handle("edith:minimize-window", (event) => {
+  verifyRenderer(event);
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win) win.minimize();
+  return true;
+});
+
+ipcMain.handle("edith:maximize-window", (event) => {
+  verifyRenderer(event);
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win) {
+    if (win.isMaximized()) {
+      win.unmaximize();
+    } else {
+      win.maximize();
+    }
+    return win.isMaximized();
+  }
+  return false;
+});
+
+ipcMain.handle("edith:close-window", (event) => {
+  verifyRenderer(event);
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win) win.close();
+  return true;
+});
+
+ipcMain.handle("edith:is-maximized", (event) => {
+  verifyRenderer(event);
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return win ? win.isMaximized() : false;
+});
+
+ipcMain.handle("edith:get-app-info", (event) => {
+  verifyRenderer(event);
+  return {
+    appName: "E.D.I.T.H.",
+    version: app.getVersion() || "0.1.0",
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+  };
+});
+
+// ======================================
+// SYSTEM TRAY
+// ======================================
+
+let tray = null;
+
+function createSystemTray(mainWindow) {
+  if (tray) return;
+
+  const iconSvg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+      <circle cx="8" cy="8" r="6" fill="#071b35" stroke="#48dfff" stroke-width="2"/>
+      <circle cx="8" cy="8" r="2.5" fill="#48dfff"/>
+    </svg>
+  `;
+  const icon = nativeImage.createFromBuffer(Buffer.from(iconSvg));
+
+  try {
+    tray = new Tray(icon);
+    tray.setToolTip("E.D.I.T.H. — Personal AI Assistant");
+
+    const contextMenu = Menu.buildFromTemplate([
+      {
+        label: "Open E.D.I.T.H",
+        click: () => {
+          if (mainWindow) {
+            mainWindow.show();
+            mainWindow.focus();
+          }
+        },
+      },
+      {
+        label: "Minimize to Tray",
+        click: () => {
+          if (mainWindow) {
+            mainWindow.hide();
+          }
+        },
+      },
+      { type: "separator" },
+      {
+        label: "Quit E.D.I.T.H",
+        click: () => {
+          app.isQuitting = true;
+          app.quit();
+        },
+      },
+    ]);
+
+    tray.setContextMenu(contextMenu);
+
+    tray.on("double-click", () => {
+      if (mainWindow.isVisible()) {
+        mainWindow.hide();
+      } else {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    });
+  } catch (error) {
+    console.error("System tray creation failed:", error);
+  }
+}
+
+// ======================================
 // WINDOW CREATION
 // ======================================
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 800,
-    minHeight: 600,
+    width: 1240,
+    height: 820,
+    minWidth: 860,
+    minHeight: 620,
     show: false,
+    frame: false,
     autoHideMenuBar: true,
     backgroundColor: "#080B14",
+    title: "E.D.I.T.H.",
 
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
-    }
+      sandbox: true,
+    },
   });
 
   mainWindow.once("ready-to-show", () => {
     mainWindow.show();
   });
 
-  mainWindow.webContents.setWindowOpenHandler(() => ({
-    action: "deny"
-  }));
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+      shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
 
   if (app.isPackaged) {
     mainWindow.loadFile(
@@ -279,6 +430,8 @@ function createWindow() {
   } else {
     mainWindow.loadURL(DEV_SERVER_URL);
   }
+
+  createSystemTray(mainWindow);
 }
 
 // ======================================

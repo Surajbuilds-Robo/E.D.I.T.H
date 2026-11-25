@@ -73,6 +73,8 @@ function Memory() {
 
   // Search, organization & pagination state.
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchMode, setSearchMode] = useState("keyword");
+  const [selectedMemoryDetail, setSelectedMemoryDetail] = useState(null);
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortBy, setSortBy] = useState("updated_at");
   const [sortOrder, setSortOrder] = useState("desc");
@@ -188,7 +190,7 @@ function Memory() {
     setError("");
 
     try {
-      const data = await searchMemories({
+      const searchParams = {
         q: searchQuery,
         category: filter,
         importance: importanceFilter,
@@ -197,7 +199,13 @@ function Memory() {
         sort_order: sortOrder,
         page,
         page_size: pageSize,
-      });
+      };
+
+      if (searchQuery.trim() && searchMode !== "keyword") {
+        searchParams.search_mode = searchMode;
+      }
+
+      const data = await searchMemories(searchParams);
       setMemories(data.items);
       setTotalCount(data.total_count);
       setTotalPages(data.total_pages);
@@ -532,10 +540,11 @@ function Memory() {
 
   useEffect(() => {
     loadMemories();
-  }, [searchQuery, filter, importanceFilter, statusFilter, sortBy, sortOrder, page, pageSize]);
+  }, [searchQuery, searchMode, filter, importanceFilter, statusFilter, sortBy, sortOrder, page, pageSize]);
 
   const hasActiveFilters =
     Boolean(searchQuery.trim()) ||
+    searchMode !== "keyword" ||
     filter !== "all" ||
     importanceFilter !== "all" ||
     statusFilter !== "all" ||
@@ -544,6 +553,7 @@ function Memory() {
 
   function clearAllFilters() {
     setSearchQuery("");
+    setSearchMode("keyword");
     setFilter("all");
     setImportanceFilter("all");
     setStatusFilter("all");
@@ -1353,7 +1363,13 @@ function Memory() {
               <input
                 type="text"
                 className="memory-search-input"
-                placeholder="Search memory content..."
+                placeholder={
+                  searchMode === "semantic"
+                    ? "Semantic search (e.g., 'dark theme preference')..."
+                    : searchMode === "hybrid"
+                    ? "Hybrid search (keyword + semantic similarity)..."
+                    : "Search memory content..."
+                }
                 value={searchQuery}
                 onChange={(e) => {
                   setSearchQuery(e.target.value);
@@ -1373,6 +1389,24 @@ function Memory() {
                   ✕
                 </button>
               )}
+            </div>
+
+            <div className="memory-search-mode-wrap">
+              <label htmlFor="memory-search-mode-select">MODE</label>
+              <select
+                id="memory-search-mode-select"
+                className="memory-search-mode-select"
+                value={searchMode}
+                onChange={(e) => {
+                  setSearchMode(e.target.value);
+                  setPage(1);
+                }}
+                title="Select search retrieval mode"
+              >
+                <option value="keyword">Keyword (ILIKE)</option>
+                <option value="semantic">Semantic (pgvector)</option>
+                <option value="hybrid">Hybrid (Combined)</option>
+              </select>
             </div>
           </div>
 
@@ -1602,6 +1636,15 @@ function Memory() {
 
                       <button
                         type="button"
+                        className="memory-details-button"
+                        onClick={() => setSelectedMemoryDetail(memory)}
+                        title="View complete memory metadata and details"
+                      >
+                        DETAILS
+                      </button>
+
+                      <button
+                        type="button"
                         onClick={() => handleEdit(memory)}
                       >
                         EDIT
@@ -1642,6 +1685,113 @@ function Memory() {
               >
                 NEXT ▶
               </button>
+            </div>
+          )}
+
+          {/* Memory Details Modal */}
+          {selectedMemoryDetail && (
+            <div className="memory-modal-overlay" onClick={() => setSelectedMemoryDetail(null)}>
+              <div className="memory-modal-card" onClick={(e) => e.stopPropagation()}>
+                <div className="memory-modal-header">
+                  <div className="memory-modal-title">
+                    <span className="modal-title-dot" />
+                    <h3>MEMORY #{selectedMemoryDetail.id} DETAILS</h3>
+                  </div>
+                  <button
+                    type="button"
+                    className="memory-modal-close"
+                    onClick={() => setSelectedMemoryDetail(null)}
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div className="memory-modal-body">
+                  <div className="modal-detail-row">
+                    <span className="detail-label">CONTENT</span>
+                    <p className="detail-content">{selectedMemoryDetail.content}</p>
+                  </div>
+
+                  <div className="modal-detail-grid">
+                    <div className="modal-grid-item">
+                      <span className="detail-label">CATEGORY</span>
+                      <span className="detail-badge category">{formatLabel(selectedMemoryDetail.category)}</span>
+                    </div>
+
+                    <div className="modal-grid-item">
+                      <span className="detail-label">IMPORTANCE</span>
+                      <span className={`detail-badge importance-${selectedMemoryDetail.importance || "normal"}`}>
+                        {formatLabel(selectedMemoryDetail.importance || "normal")}
+                      </span>
+                    </div>
+
+                    <div className="modal-grid-item">
+                      <span className="detail-label">STATUS</span>
+                      <span className={`detail-badge status-${selectedMemoryDetail.is_archived ? "archived" : "active"}`}>
+                        {selectedMemoryDetail.is_archived ? "ARCHIVED" : "ACTIVE"}
+                      </span>
+                    </div>
+
+                    <div className="modal-grid-item">
+                      <span className="detail-label">USAGE COUNT</span>
+                      <span className="detail-value">{selectedMemoryDetail.usage_count ?? 0}</span>
+                    </div>
+
+                    <div className="modal-grid-item">
+                      <span className="detail-label">LAST USED</span>
+                      <span className="detail-value">
+                        {selectedMemoryDetail.last_used_at ? formatDate(selectedMemoryDetail.last_used_at) : "Never"}
+                      </span>
+                    </div>
+
+                    <div className="modal-grid-item">
+                      <span className="detail-label">EXPIRES AT</span>
+                      <span className="detail-value">
+                        {selectedMemoryDetail.expires_at ? formatDate(selectedMemoryDetail.expires_at) : "Never"}
+                      </span>
+                    </div>
+
+                    <div className="modal-grid-item">
+                      <span className="detail-label">CREATED AT</span>
+                      <span className="detail-value">{formatDate(selectedMemoryDetail.created_at)}</span>
+                    </div>
+
+                    <div className="modal-grid-item">
+                      <span className="detail-label">UPDATED AT</span>
+                      <span className="detail-value">{formatDate(selectedMemoryDetail.updated_at)}</span>
+                    </div>
+
+                    <div className="modal-grid-item full-width">
+                      <span className="detail-label">VECTOR EMBEDDING</span>
+                      <div className="vector-status-pill">
+                        <span className="vector-dot" />
+                        <span>1024-dimensional BGE-M3 dense vector registered in pgvector</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="memory-modal-footer">
+                  <button
+                    type="button"
+                    className="modal-action-btn edit"
+                    onClick={() => {
+                      const m = selectedMemoryDetail;
+                      setSelectedMemoryDetail(null);
+                      handleEdit(m);
+                    }}
+                  >
+                    Edit Memory
+                  </button>
+                  <button
+                    type="button"
+                    className="modal-action-btn close"
+                    onClick={() => setSelectedMemoryDetail(null)}
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 

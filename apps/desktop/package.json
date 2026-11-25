@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && electron .\"",
     "build": "vite build",
+    "package:win": "vite build && electron-builder --win",
+    "package:dir": "vite build && electron-builder --dir",
     "start": "electron ."
   },
   "dependencies": {
