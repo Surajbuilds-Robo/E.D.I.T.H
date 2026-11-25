@@ -1,11 +1,11 @@
 
 import json
 import re
-
+from backend.services.memory_lock import acquire_user_memory_lock
 from difflib import SequenceMatcher
 from datetime import datetime, timezone
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_, update
 from sqlalchemy.orm import Session
 
 import httpx
@@ -282,9 +282,22 @@ def get_memory_context(
         return ""
 
     # Update usage metadata for memories included in context.
-    for memory in used_memories:
-        memory.usage_count = (memory.usage_count or 0) + 1
-        memory.last_used_at = current_time
+    # Atomically update usage metadata for selected memories.
+    used_memory_ids = [memory.id for memory in used_memories]
+
+    db.execute(
+        update(UserMemory)
+        .where(
+            UserMemory.id.in_(used_memory_ids),
+            UserMemory.user_id == user_id,
+            UserMemory.is_archived.is_(False),
+        )
+        .values(
+            usage_count=func.coalesce(UserMemory.usage_count, 0) + 1,
+            last_used_at=current_time,
+        )
+        .execution_options(synchronize_session=False)
+    )
 
     db.commit()
 
@@ -767,12 +780,14 @@ def get_conversation(
 @router.delete(
     "/conversations/{conversation_id}"
 )
+
 def delete_conversation(
     conversation_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-
+    # Serialize conversation deletion with this user's memory writes.
+    acquire_user_memory_lock(db, current_user.id)
     conversation = (
         db.query(Conversation)
         .filter(
